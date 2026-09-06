@@ -1,0 +1,29 @@
+name: CI Simulation 6-DOF
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  headless-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright Chromium & OS deps
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Headless Playwright Flight Test
+        run: npm test
