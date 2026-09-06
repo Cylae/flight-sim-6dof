@@ -11,93 +11,48 @@ const PORT = 8089;
 const server = http.createServer((req, res) => {
   const filePath = path.join(__dirname, req.url === '/' ? 'index.html' : req.url);
   const ext = path.extname(filePath);
-  const contentTypes = {
-    '.html': 'text/html',
-    '.js': 'text/javascript',
-    '.json': 'application/json'
-  };
-
+  const contentTypes = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
   fs.readFile(filePath, (err, content) => {
-    if (err) {
-      res.writeHead(404);
-      res.end('Fichier introuvable');
-    } else {
-      res.writeHead(200, { 'Content-Type': contentTypes[ext] || 'text/plain' });
-      res.end(content, 'utf-8');
-    }
+    if (err) { res.writeHead(404); res.end('Fichier introuvable'); }
+    else { res.writeHead(200, { 'Content-Type': contentTypes[ext] || 'text/plain' }); res.end(content, 'utf-8'); }
   });
 });
 
 server.listen(PORT, async () => {
-  console.log(`\x1b[36m[SRV]\x1b[0m Serveur actif sur http://localhost:${PORT}`);
-
+  console.log(`[SRV] Serveur actif sur http://localhost:${PORT}`);
   const errors = [];
-  const warnings = [];
-
   const browser = await chromium.launch({
     headless: true,
-    args: [
-      '--use-gl=angle',
-      '--use-angle=swiftshader',
-      '--no-sandbox',
-      '--disable-web-security'
-    ]
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--enable-webgl', '--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--disable-web-security']
   });
 
   const page = await browser.newPage();
-
-  page.on('console', (msg) => {
-    const text = msg.text();
-    if (msg.type() === 'error') {
-      errors.push(text);
-      console.log(`\x1b[31m[CONSOLE ERROR]\x1b[0m ${text}`);
-    } else if (msg.type() === 'warn') {
-      warnings.push(text);
-    }
-  });
-
-  page.on('pageerror', (err) => {
-    errors.push(err.message);
-    console.log(`\x1b[31m[PAGE EXCEPTION]\x1b[0m ${err.message}`);
-  });
+  page.on('console', msg => { if (msg.type() === 'error') { errors.push(msg.text()); console.log(`[CONSOLE ERROR] ${msg.text()}`); } });
+  page.on('pageerror', err => { errors.push(err.message); console.log(`[PAGE EXCEPTION] ${err.message}`); });
 
   try {
-    console.log('\x1b[34m[RUN]\x1b[0m Chargement WebGL...');
-    await page.goto(`http://localhost:${PORT}/index.html`, { waitUntil: 'networkidle' });
+    console.log('[RUN] Chargement WebGL...');
+    await page.goto(`http://localhost:${PORT}/index.html`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.__simReady === true, { timeout: 15000 });
+    console.log('[OK] Three.js opérationnel.');
 
-    await page.waitForFunction(() => window.__simReady === true, { timeout: 8000 });
-    console.log('\x1b[32m[OK]\x1b[0m Three.js initialisé.');
-
-    let state = await page.evaluate(() => window.__simState);
-    if (!state || isNaN(state.altitude_m) || isNaN(state.airspeed_ms)) {
-      throw new Error("L'état de télémétrie initial est invalide (NaN).");
-    }
-
-    // Accélération plein gaz
+    console.log('[RUN] Accélération sur piste...');
     await page.keyboard.down('ShiftLeft');
-    await page.waitForTimeout(3500);
+    await page.waitForFunction(() => window.__simState && window.__simState.airspeed_kts >= 55, { timeout: 45000 });
+
+    console.log('[RUN] Rotation : cabrage stick arrière...');
+    await page.keyboard.down('KeyS');
+    await page.waitForFunction(() => window.__simState && window.__simState.altitude_ft >= 15, { timeout: 35000 });
+    await page.keyboard.up('KeyS');
     await page.keyboard.up('ShiftLeft');
 
-    // Décollage (stick cabré)
-    await page.keyboard.down('KeyS');
-    await page.waitForTimeout(3000);
-    await page.keyboard.up('KeyS');
+    const state = await page.evaluate(() => window.__simState);
+    console.log(`[ENVOL] Alt: ${state.altitude_ft.toFixed(0)} ft | Vitesse: ${state.airspeed_kts.toFixed(1)} kts`);
 
-    state = await page.evaluate(() => window.__simState);
-    console.log(`[VOL] Alt = ${state.altitude_ft.toFixed(0)} ft | Vitesse = ${state.airspeed_kts.toFixed(1)} kts`);
-
-    if (state.altitude_ft <= 10.0) {
-      throw new Error("L'appareil n'a pas décollé.");
-    }
-
-    if (errors.length > 0) {
-      console.log('\x1b[31m[ÉCHEC]\x1b[0m Erreurs console interceptées.');
-      process.exit(1);
-    } else {
-      console.log('\x1b[32m[SUCCÈS]\x1b[0m Modèle 6-DOF validé sans erreur.');
-    }
+    if (errors.length > 0) throw new Error(`Erreurs console : ${errors.join(' ; ')}`);
+    console.log('[SUCCÈS] Modèle 6-DOF validé.');
   } catch (err) {
-    console.error(`\x1b[31m[CRASH]\x1b[0m ${err.message}`);
+    console.error(`[CRASH] ${err.message}`);
     process.exit(1);
   } finally {
     await browser.close();

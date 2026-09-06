@@ -16,7 +16,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install dependencies
         run: npm install
@@ -24,5 +24,5 @@ jobs:
       - name: Install Playwright Chromium & OS deps
         run: npx playwright install --with-deps chromium
 
-      - name: Run Headless Playwright Flight Test
-        run: npm test
+      - name: Run Headless Flight Test with Xvfb
+        run: xvfb-run --auto-servernum npm test
