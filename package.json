@@ -1,0 +1,11 @@
+{
+  "name": "flight-sim-6dof",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node test-headless.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

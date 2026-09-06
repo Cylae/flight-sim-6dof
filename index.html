@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Simulateur de vol 6-DOF</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body, html { width: 100%; height: 100%; overflow: hidden; background: #050811; font-family: 'Courier New', monospace; }
+    #viewport { width: 100%; height: 100%; display: block; }
+    #hud-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+    #ui-overlay {
+      position: absolute; bottom: 15px; left: 15px; color: #00ff88;
+      font-size: 11px; line-height: 1.4; text-shadow: 0 0 4px rgba(0,255,136,0.6);
+      background: rgba(4, 18, 12, 0.75); padding: 10px 14px; border: 1px solid #00ff88; border-radius: 3px;
+    }
+    #audio-gate {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: rgba(3, 10, 7, 0.95); border: 2px solid #00ff88; color: #00ff88;
+      padding: 24px 32px; text-align: center; border-radius: 4px; cursor: pointer;
+      box-shadow: 0 0 25px rgba(0,255,136,0.3); z-index: 100;
+    }
+    #audio-gate h1 { font-size: 18px; margin-bottom: 8px; letter-spacing: 2px; }
+    #audio-gate p { font-size: 12px; color: #88ffbb; }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+  <div id="audio-gate">
+    <h1>SIMULATEUR DE VOL 6-DOF</h1>
+    <p>[ Cliquer pour démarrer le moteur et l'avionique ]</p>
+  </div>
+  <canvas id="viewport"></canvas>
+  <canvas id="hud-canvas"></canvas>
+  <div id="ui-overlay">
+    <b>COMMANDES :</b><br>
+    W / S : Profondeur (tangage)<br>
+    A / D : Ailerons (roulis)<br>
+    Q / E : Direction (lacet)<br>
+    Shift / Ctrl : Gaz (0 - 100 %)<br>
+    B : Freins de roues<br>
+    F : Volets (0 / 1 / 2)<br>
+    C : Caméra (cockpit / poursuite)
+  </div>
+
+  <script>
+    window.__simReady = false;
+    window.__simState = null;
+
+    let audioCtx = null, engineOsc = null, engineGain = null, windGain = null;
+    function initAudio() {
+      if (audioCtx) return;
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new AudioContext();
+
+      engineOsc = audioCtx.createOscillator();
+      engineOsc.type = 'sawtooth';
+      engineOsc.frequency.setValueAtTime(55, audioCtx.currentTime);
+
+      const engineFilter = audioCtx.createBiquadFilter();
+      engineFilter.type = 'lowpass';
+      engineFilter.frequency.setValueAtTime(450, audioCtx.currentTime);
+
+      engineGain = audioCtx.createGain();
+      engineGain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+
+      engineOsc.connect(engineFilter);
+      engineFilter.connect(engineGain);
+      engineGain.connect(audioCtx.destination);
+      engineOsc.start();
+
+      const bufferSize = audioCtx.sampleRate * 2;
+      const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const output = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) output[i] = Math.random() * 2 - 1;
+
+      const whiteNoise = audioCtx.createBufferSource();
+      whiteNoise.buffer = noiseBuffer;
+      whiteNoise.loop = true;
+
+      const windFilter = audioCtx.createBiquadFilter();
+      windFilter.type = 'bandpass';
+      windFilter.frequency.setValueAtTime(600, audioCtx.currentTime);
+      windFilter.Q.setValueAtTime(1.5, audioCtx.currentTime);
+
+      windGain = audioCtx.createGain();
+      windGain.gain.setValueAtTime(0.0, audioCtx.currentTime);
+
+      whiteNoise.connect(windFilter);
+      windFilter.connect(windGain);
+      windGain.connect(audioCtx.destination);
+      whiteNoise.start();
+    }
+
+    document.getElementById('audio-gate').addEventListener('click', () => {
+      initAudio();
+      document.getElementById('audio-gate').style.display = 'none';
+    });
+
+    const viewport = document.getElementById('viewport');
+    const hudCanvas = document.getElementById('hud-canvas');
+    const hudCtx = hudCanvas.getContext('2d');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x7ba0c0);
+    scene.fog = new THREE.FogExp2(0x7ba0c0, 0.00015);
+
+    const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.2, 50000);
+    const renderer = new THREE.WebGLRenderer({ canvas: viewport, antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x3d5a38, 0.85));
+    const dirLight = new THREE.DirectionalLight(0xfffaed, 0.9);
+    dirLight.position.set(500, 1500, 500);
+    scene.add(dirLight);
+
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(30000, 30000), new THREE.MeshLambertMaterial({ color: 0x2e4228 }));
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    const runway = new THREE.Mesh(new THREE.PlaneGeometry(50, 2400), new THREE.MeshLambertMaterial({ color: 0x1a1a1a }));
+    runway.rotation.x = -Math.PI / 2;
+    runway.position.set(0, 0.05, -700);
+    scene.add(runway);
+
+    const line = new THREE.Mesh(new THREE.PlaneGeometry(2, 2200), new THREE.MeshBasicMaterial({ color: 0xdddddd }));
+    line.rotation.x = -Math.PI / 2;
+    line.position.set(0, 0.08, -700);
+    scene.add(line);
+
+    const aircraft = new THREE.Group();
+    const fuseMat = new THREE.MeshStandardMaterial({ color: 0xe0e6ed, roughness: 0.4 });
+    const wingMat = new THREE.MeshStandardMaterial({ color: 0x224488, roughness: 0.5 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+
+    const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.4, 7.5, 12), fuseMat);
+    fuselage.rotation.x = Math.PI / 2;
+    aircraft.add(fuselage);
+
+    const wings = new THREE.Mesh(new THREE.BoxGeometry(11.0, 0.12, 1.6), wingMat);
+    wings.position.set(0, 0.1, -0.2);
+    aircraft.add(wings);
+
+    const hStab = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.08, 0.9), wingMat);
+    hStab.position.set(0, 0.25, 3.1);
+    aircraft.add(hStab);
+
+    const vStab = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.4, 1.1), wingMat);
+    vStab.position.set(0, 0.9, 3.0);
+    aircraft.add(vStab);
+
+    const prop = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.1, 0.05), darkMat);
+    prop.position.set(0, 0, -3.8);
+    aircraft.add(prop);
+
+    scene.add(aircraft);
+
+    const mass = 1150.0;
+    const wingArea = 16.2;
+    const wingSpan = 11.0;
+    const chord = 1.5;
+    const maxThrust = 4200.0;
+    const Ixx = 1250.0, Iyy = 1750.0, Izz = 2600.0;
+
+    const pos = new THREE.Vector3(0, 1.15, 300);
+    const vel = new THREE.Vector3(0, 0, 0);
+    const angVel = new THREE.Vector3(0, 0, 0);
+
+    let throttle = 0.0, flaps = 0, cockpitView = false;
+    const inputs = { pitch: 0, roll: 0, yaw: 0, brakes: false };
+    const keys = {};
+
+    window.addEventListener('keydown', (e) => {
+      keys[e.code] = true;
+      if (e.code === 'KeyF') flaps = (flaps + 1) % 3;
+      if (e.code === 'KeyC') cockpitView = !cockpitView;
+    });
+    window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+    function updateInputs(dt) {
+      inputs.pitch = 0; inputs.roll = 0; inputs.yaw = 0;
+      inputs.brakes = !!keys['KeyB'];
+
+      if (keys['KeyW'] || keys['ArrowDown']) inputs.pitch += 1;
+      if (keys['KeyS'] || keys['ArrowUp'])   inputs.pitch -= 1;
+      if (keys['KeyA'] || keys['ArrowLeft']) inputs.roll  -= 1;
+      if (keys['KeyD'] || keys['ArrowRight'])inputs.roll  += 1;
+      if (keys['KeyQ']) inputs.yaw -= 1;
+      if (keys['KeyE']) inputs.yaw += 1;
+
+      if (keys['ShiftLeft'] || keys['ShiftRight']) throttle = Math.min(1.0, throttle + 0.35 * dt);
+      if (keys['ControlLeft'] || keys['ControlRight']) throttle = Math.max(0.0, throttle - 0.35 * dt);
+    }
+
+    function computePhysics(dt) {
+      const q = aircraft.quaternion;
+      const invQ = q.clone().invert();
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+
+      const localVel = vel.clone().applyQuaternion(invQ);
+      const u = -localVel.z, v = localVel.x, w = localVel.y;
+      const airspeed = vel.length();
+      const safeAirspeed = Math.max(airspeed, 0.5);
+
+      const alpha = Math.atan2(-w, Math.max(u, 1.0));
+      const beta  = Math.atan2(v,  Math.max(u, 1.0));
+
+      const rho = 1.225 * Math.exp(-pos.y / 8500.0);
+      const qDyn = 0.5 * rho * (airspeed * airspeed);
+
+      const flapCL = flaps * 0.35;
+      const flapCD = flaps * 0.03;
+      let CL = 0.22 + 5.2 * alpha + flapCL;
+      const alphaStall = 0.26;
+      let isStalled = false;
+
+      if (Math.abs(alpha) > alphaStall) {
+        isStalled = true;
+        CL = (0.22 + flapCL) * Math.sign(alpha) * 0.65 * Math.cos(alpha);
+      }
+
+      const AR = (wingSpan * wingSpan) / wingArea;
+      const CDi = (CL * CL) / (Math.PI * AR * 0.82);
+      const CD = 0.024 + flapCD + CDi + (isStalled ? 0.25 * (Math.abs(alpha) - alphaStall) : 0);
+
+      const localLift = qDyn * wingArea * CL;
+      const localDrag = qDyn * wingArea * CD;
+
+      const localAeroForce = new THREE.Vector3(
+        -qDyn * wingArea * 0.25 * beta,
+        localLift * Math.cos(alpha) - localDrag * Math.sin(alpha),
+        -(localLift * Math.sin(alpha) + localDrag * Math.cos(alpha))
+      );
+
+      const totalForce = localAeroForce.applyQuaternion(q)
+        .add(fwd.clone().multiplyScalar(throttle * maxThrust))
+        .add(new THREE.Vector3(0, -mass * 9.81, 0));
+
+      vel.addScaledVector(totalForce.divideScalar(mass), dt);
+      pos.addScaledVector(vel, dt);
+
+      const Vnorm = 2.0 * safeAirspeed;
+      const pitchTorque = (qDyn * wingArea * chord) * (-0.55 * (alpha - 0.04) - 1.35 * inputs.pitch - 14.0 * (chord / Vnorm) * angVel.x);
+      const rollTorque  = (qDyn * wingArea * wingSpan) * (0.22 * inputs.roll - 9.0 * (wingSpan / Vnorm) * angVel.z);
+      const yawTorque   = (qDyn * wingArea * wingSpan) * (-0.18 * beta - 0.12 * inputs.yaw - 5.5 * (wingSpan / Vnorm) * angVel.y);
+
+      angVel.x += (pitchTorque / Iyy) * dt;
+      angVel.z += (rollTorque  / Ixx) * dt;
+      angVel.y += (yawTorque   / Izz) * dt;
+
+      aircraft.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(angVel.x * dt, angVel.y * dt, angVel.z * dt, 'YXZ'))).normalize();
+
+      if (pos.y <= 1.15) {
+        pos.y = 1.15;
+        if (vel.y < 0) vel.y = 0;
+        const brakeMu = inputs.brakes ? 9.5 : 0.35;
+        vel.x *= Math.max(0, 1.0 - brakeMu * dt);
+        vel.z *= Math.max(0, 1.0 - brakeMu * dt);
+        angVel.x *= 0.75;
+        angVel.z *= 0.75;
+      }
+
+      aircraft.position.copy(pos);
+      prop.rotation.z += (throttle * 80 + airspeed * 2 + 10) * dt;
+
+      if (engineOsc && audioCtx) {
+        engineOsc.frequency.setTargetAtTime(45 + throttle * 130 + (airspeed * 0.4), audioCtx.currentTime, 0.05);
+        windGain.gain.setTargetAtTime(Math.min(1.0, airspeed / 90.0) * 0.18, audioCtx.currentTime, 0.05);
+      }
+
+      window.__simState = {
+        altitude_m: pos.y,
+        airspeed_ms: airspeed,
+        airspeed_kts: airspeed * 1.94384,
+        altitude_ft: pos.y * 3.28084,
+        alpha_deg: alpha * (180 / Math.PI),
+        throttle_pct: Math.round(throttle * 100),
+        isStalled,
+        pos: { x: pos.x, y: pos.y, z: pos.z }
+      };
+    }
+
+    function resize() {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      hudCanvas.width = window.innerWidth;
+      hudCanvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function drawHUD() {
+      const w = hudCanvas.width, h = hudCanvas.height;
+      hudCtx.clearRect(0, 0, w, h);
+      const state = window.__simState;
+      if (!state) return;
+
+      const euler = new THREE.Euler().setFromQuaternion(aircraft.quaternion, 'YXZ');
+      const pitch = euler.x, roll = euler.z, heading = ((-euler.y * 180 / Math.PI) % 360 + 360) % 360;
+      const cx = w / 2, cy = h / 2;
+
+      hudCtx.save();
+      hudCtx.strokeStyle = '#00ff88';
+      hudCtx.fillStyle = '#00ff88';
+      hudCtx.lineWidth = 1.5;
+      hudCtx.font = '12px Courier New';
+
+      hudCtx.beginPath();
+      hudCtx.moveTo(cx - 15, cy); hudCtx.lineTo(cx - 5, cy);
+      hudCtx.moveTo(cx + 5, cy);  hudCtx.lineTo(cx + 15, cy);
+      hudCtx.moveTo(cx, cy - 5);  hudCtx.lineTo(cx, cy + 5);
+      hudCtx.stroke();
+
+      hudCtx.save();
+      hudCtx.translate(cx, cy);
+      hudCtx.rotate(-roll);
+      hudCtx.translate(0, pitch * 450);
+
+      for (let deg = -40; deg <= 40; deg += 10) {
+        if (deg === 0) {
+          hudCtx.beginPath(); hudCtx.moveTo(-80, 0); hudCtx.lineTo(80, 0); hudCtx.stroke();
+          continue;
+        }
+        const y = -deg * (Math.PI / 180) * 450;
+        hudCtx.beginPath();
+        hudCtx.moveTo(-35, y); hudCtx.lineTo(-15, y);
+        hudCtx.moveTo(15, y);  hudCtx.lineTo(35, y);
+        hudCtx.stroke();
+        hudCtx.fillText(deg.toString(), 42, y + 4);
+      }
+      hudCtx.restore();
+
+      hudCtx.strokeRect(cx - 240, cy - 100, 55, 200);
+      hudCtx.fillText('KIAS', cx - 232, cy - 108);
+      hudCtx.fillText(state.airspeed_kts.toFixed(0), cx - 225, cy + 5);
+
+      hudCtx.strokeRect(cx + 185, cy - 100, 65, 200);
+      hudCtx.fillText('ALT FT', cx + 192, cy - 108);
+      hudCtx.fillText(state.altitude_ft.toFixed(0), cx + 195, cy + 5);
+
+      hudCtx.strokeRect(cx - 80, 25, 160, 28);
+      hudCtx.fillText(`HDG: ${heading.toFixed(0).padStart(3, '0')}°`, cx - 35, 43);
+
+      hudCtx.fillText(`THR: ${state.throttle_pct}%`, cx - 120, h - 35);
+      hudCtx.fillText(`FLP: ${flaps}`, cx, h - 35);
+      hudCtx.fillText(`AoA: ${state.alpha_deg.toFixed(1)}°`, cx + 80, h - 35);
+
+      if (state.isStalled && Math.floor(performance.now() / 250) % 2 === 0) {
+        hudCtx.fillStyle = '#ff2233';
+        hudCtx.font = 'bold 22px Courier New';
+        hudCtx.fillText('STALL', cx - 35, cy - 60);
+      }
+      hudCtx.restore();
+    }
+
+    let lastTime = performance.now();
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime = now;
+
+      updateInputs(dt);
+      computePhysics(dt);
+
+      if (cockpitView) {
+        const eyeOffset = new THREE.Vector3(0, 0.45, -0.6).applyQuaternion(aircraft.quaternion);
+        camera.position.copy(pos).add(eyeOffset);
+        const lookTarget = new THREE.Vector3(0, 0.4, -20).applyQuaternion(aircraft.quaternion);
+        camera.lookAt(camera.position.clone().add(lookTarget));
+      } else {
+        const followOffset = new THREE.Vector3(0, 3.2, 14.0).applyQuaternion(aircraft.quaternion);
+        camera.position.lerp(pos.clone().add(followOffset), 0.12);
+        camera.lookAt(pos.clone().add(new THREE.Vector3(0, 0.8, -4).applyQuaternion(aircraft.quaternion)));
+      }
+
+      renderer.render(scene, camera);
+      drawHUD();
+      window.__simReady = true;
+    }
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
