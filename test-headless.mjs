@@ -31,26 +31,29 @@ server.listen(PORT, async () => {
   page.on('pageerror', err => { errors.push(err.message); console.log(`[PAGE EXCEPTION] ${err.message}`); });
 
   try {
-    console.log('[RUN] Chargement WebGL...');
+    console.log('[RUN] Initialisation WebGL Three.js...');
     await page.goto(`http://localhost:${PORT}/index.html`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.__simReady === true, { timeout: 15000 });
-    console.log('[OK] Three.js opérationnel.');
+    console.log('[OK] Moteur de rendu opérationnel.');
 
-    console.log('[RUN] Accélération sur piste...');
+    console.log('[RUN] Accélération : Poussée 100 %...');
     await page.keyboard.down('ShiftLeft');
-    await page.waitForFunction(() => window.__simState && window.__simState.airspeed_kts >= 55, { timeout: 45000 });
+    await page.waitForFunction(() => window.__simState && window.__simState.airspeed_kts >= 55, { timeout: 35000 });
 
-    console.log('[RUN] Rotation : cabrage stick arrière...');
+    let state = await page.evaluate(() => window.__simState);
+    console.log(`[ROULAGE] Vitesse de rotation atteinte : ${state.airspeed_kts.toFixed(1)} kts`);
+
+    console.log('[RUN] Rotation : Manche arrière (S)...');
     await page.keyboard.down('KeyS');
-    await page.waitForFunction(() => window.__simState && window.__simState.altitude_ft >= 15, { timeout: 35000 });
+    await page.waitForFunction(() => window.__simState && window.__simState.altitude_ft >= 20, { timeout: 25000 });
     await page.keyboard.up('KeyS');
     await page.keyboard.up('ShiftLeft');
 
-    const state = await page.evaluate(() => window.__simState);
-    console.log(`[ENVOL] Alt: ${state.altitude_ft.toFixed(0)} ft | Vitesse: ${state.airspeed_kts.toFixed(1)} kts`);
+    state = await page.evaluate(() => window.__simState);
+    console.log(`[ENVOL CONFIRMÉ] Altitude: ${state.altitude_ft.toFixed(0)} ft AGL | Vitesse: ${state.airspeed_kts.toFixed(1)} kts | Incidence: ${state.alpha_deg.toFixed(1)}°`);
 
     if (errors.length > 0) throw new Error(`Erreurs console : ${errors.join(' ; ')}`);
-    console.log('[SUCCÈS] Modèle 6-DOF validé.');
+    console.log('[SUCCÈS] Décollage et vol validés avec succès.');
   } catch (err) {
     console.error(`[CRASH] ${err.message}`);
     process.exit(1);
